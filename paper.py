@@ -190,7 +190,7 @@ class ArxivPaper:
         if self.tex is not None:
             content = self.tex.get("all")
             if content is None:
-                content = "\n".join(self.tex.values())
+               content = "\n".join(v if v is not None else '' for v in self.tex.values())
             #search for affiliations
             possible_regions = [r'\\author.*?\\maketitle',r'\\begin{document}.*?\\begin{abstract}']
             matches = [re.search(p, content, flags=re.DOTALL) for p in possible_regions]
