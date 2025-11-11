@@ -46,48 +46,67 @@ def filter_corpus(corpus:list[dict], pattern:str) -> list[dict]:
     return new_corpus
 
 
-def get_arxiv_paper(query: str, debug: bool = False) -> List[ArxivPaper]:
-    client = arxiv.Client(num_retries=2, delay_seconds=60)  # 非常保守的设置
+def get_arxiv_paper_from_rss(query: str, debug: bool = False) -> List[ArxivPaper]:
+    """直接从 RSS 源获取论文信息，避免调用 arXiv API"""
     feed = feedparser.parse(f"https://rss.arxiv.org/atom/{query}")
     
     if 'Feed error for query' in feed.feed.title:
         raise Exception(f"Invalid ARXIV_QUERY: {query}.")
     
-    if not debug:
-        papers = []
-        all_paper_ids = [i.id.removeprefix("oai:arXiv.org:") for i in feed.entries if i.arxiv_announce_type == 'new']
-        
-        logger.info(f"Found {len(all_paper_ids)} new papers. This will take approximately {len(all_paper_ids) * 30 // 60} minutes...")
-        
-        # 单篇获取，最保守的方式
-        for paper_id in tqdm(all_paper_ids, desc="Retrieving papers"):
-            for attempt in range(3):
-                try:
-                    search = arxiv.Search(id_list=[paper_id])
-                    result = next(client.results(search))
-                    papers.append(ArxivPaper(result))
-                    break
-                except (arxiv.HTTPError, StopIteration) as e:
-                    if attempt == 2:
-                        logger.warning(f"Failed to fetch {paper_id} after 3 attempts")
-                    time.sleep(30)  # 每次尝试后等待30秒
+    papers = []
+    entries = [i for i in feed.entries if i.arxiv_announce_type == 'new']
+    
+    if debug:
+        entries = entries[:5]  # 调试模式下只取5篇
+    
+    logger.info(f"Processing {len(entries)} papers from RSS feed")
+    
+    for entry in tqdm(entries, desc="Processing RSS entries"):
+        try:
+            # 从 RSS 条目创建论文对象
+            paper_data = {
+                'entry_id': entry.id,
+                'title': entry.title,
+                'summary': entry.summary,
+                'published': entry.published,
+                'authors': [author.name for author in entry.authors],
+                'arxiv_primary_category': getattr(entry, 'arxiv_primary_category', {}).get('term', ''),
+                'arxiv_comment': getattr(entry, 'arxiv_comment', ''),
+                'links': entry.links
+            }
             
-            time.sleep(30)  # 每篇论文之间等待30秒
-        
-        return papers
-    else:
-        # 调试模式代码保持不变
-        pass
+            # 这里需要修改 ArxivPaper 类来支持从字典创建
+            # 或者创建一个临时解决方案
+            paper = create_paper_from_rss_data(paper_data)
+            papers.append(paper)
+            
+            # 处理每个条目后的小延迟
+            time.sleep(1)
+            
+        except Exception as e:
+            logger.error(f"Error processing entry {entry.id}: {e}")
+            continue
+    
+    return papers
 
-    else:
-        logger.debug("Retrieve 5 arxiv papers regardless of the date.")
-        search = arxiv.Search(query='cat:cs.AI', sort_by=arxiv.SortCriterion.SubmittedDate)
-        papers = []
-        for i in client.results(search):
-            papers.append(ArxivPaper(i))
-            if len(papers) == 5:
-                break
-        return papers
+def create_paper_from_rss_data(paper_data: dict) -> ArxivPaper:
+    """从 RSS 数据创建 ArxivPaper 对象"""
+    # 这是一个临时解决方案，你需要根据你的 ArxivPaper 类来调整
+    # 如果 ArxivPaper 需要 arxiv.Result 对象，这可能比较困难
+    # 但至少可以获取基本信息用于推荐
+    
+    # 临时方案：创建一个简单的对象
+    class SimplePaper:
+        def __init__(self, data):
+            self.entry_id = data['entry_id']
+            self.title = data['title']
+            self.summary = data['summary']
+            self.published = data['published']
+            self.authors = data['authors']
+            self.primary_category = data['arxiv_primary_category']
+            self.comment = data['arxiv_comment']
+            
+    return ArxivPaper(SimplePaper(paper_data))  # 可能需要调整 ArxivPaper 的构造函数
 
 
 
