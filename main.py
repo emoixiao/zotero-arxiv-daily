@@ -47,20 +47,51 @@ def filter_corpus(corpus:list[dict], pattern:str) -> list[dict]:
 
 
 def get_arxiv_paper(query:str, debug:bool=False) -> list[ArxivPaper]:
-    client = arxiv.Client(num_retries=10,delay_seconds=10)
+    def fetch_batch_with_retry(batch_ids, max_retries=3):
+        """获取单个批次，带有重试逻辑"""
+        for attempt in range(max_retries):
+            try:
+                search = arxiv.Search(id_list=batch_ids)
+                return [ArxivPaper(p) for p in client.results(search)]
+            except arxiv.HTTPError as e:
+                if e.status == 429:
+                    wait_time = 30 * (attempt + 1)  # 30, 60, 90秒
+                    logger.warning(f"Rate limited (attempt {attempt+1}/{max_retries}). Waiting {wait_time} seconds...")
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    raise
+            except Exception as e:
+                logger.error(f"Error on attempt {attempt+1}: {e}")
+                if attempt == max_retries - 1:
+                    raise
+                time.sleep(10)
+        return []
+
+    client = arxiv.Client(num_retries=5, delay_seconds=5)
     feed = feedparser.parse(f"https://rss.arxiv.org/atom/{query}")
     if 'Feed error for query' in feed.feed.title:
         raise Exception(f"Invalid ARXIV_QUERY: {query}.")
+    
     if not debug:
         papers = []
         all_paper_ids = [i.id.removeprefix("oai:arXiv.org:") for i in feed.entries if i.arxiv_announce_type == 'new']
-        bar = tqdm(total=len(all_paper_ids),desc="Retrieving Arxiv papers")
-        for i in range(0,len(all_paper_ids),20):
-            search = arxiv.Search(id_list=all_paper_ids[i:i+20])
-            batch = [ArxivPaper(p) for p in client.results(search)]
-            bar.update(len(batch))
-            papers.extend(batch)
+        bar = tqdm(total=len(all_paper_ids), desc="Retrieving Arxiv papers")
+        
+        batch_size = 20  # 较小的批次大小
+        for i in range(0, len(all_paper_ids), batch_size):
+            batch_ids = all_paper_ids[i:i+batch_size]
+            batch_papers = fetch_batch_with_retry(batch_ids)
+            bar.update(len(batch_papers))
+            papers.extend(batch_papers)
+            
+            # 批次间延迟
+            if i + batch_size < len(all_paper_ids):
+                delay = 5 + random.uniform(0, 3)
+                time.sleep(delay)
+                
         bar.close()
+        return papers
 
     else:
         logger.debug("Retrieve 5 arxiv papers regardless of the date.")
@@ -70,8 +101,7 @@ def get_arxiv_paper(query:str, debug:bool=False) -> list[ArxivPaper]:
             papers.append(ArxivPaper(i))
             if len(papers) == 5:
                 break
-
-    return papers
+        return papers
 
 
 
