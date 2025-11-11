@@ -46,52 +46,38 @@ def filter_corpus(corpus:list[dict], pattern:str) -> list[dict]:
     return new_corpus
 
 
-def get_arxiv_paper(query:str, debug:bool=False) -> list[ArxivPaper]:
-    def fetch_batch_with_retry(batch_ids, max_retries=3):
-        """获取单个批次，带有重试逻辑"""
-        for attempt in range(max_retries):
-            try:
-                search = arxiv.Search(id_list=batch_ids)
-                return [ArxivPaper(p) for p in client.results(search)]
-            except arxiv.HTTPError as e:
-                if e.status == 429:
-                    wait_time = 30 * (attempt + 1)  # 30, 60, 90秒
-                    logger.warning(f"Rate limited (attempt {attempt+1}/{max_retries}). Waiting {wait_time} seconds...")
-                    time.sleep(wait_time)
-                    continue
-                else:
-                    raise
-            except Exception as e:
-                logger.error(f"Error on attempt {attempt+1}: {e}")
-                if attempt == max_retries - 1:
-                    raise
-                time.sleep(10)
-        return []
-
-    client = arxiv.Client(num_retries=5, delay_seconds=5)
+def get_arxiv_paper(query: str, debug: bool = False) -> List[ArxivPaper]:
+    client = arxiv.Client(num_retries=2, delay_seconds=60)  # 非常保守的设置
     feed = feedparser.parse(f"https://rss.arxiv.org/atom/{query}")
+    
     if 'Feed error for query' in feed.feed.title:
         raise Exception(f"Invalid ARXIV_QUERY: {query}.")
     
     if not debug:
         papers = []
         all_paper_ids = [i.id.removeprefix("oai:arXiv.org:") for i in feed.entries if i.arxiv_announce_type == 'new']
-        bar = tqdm(total=len(all_paper_ids), desc="Retrieving Arxiv papers")
         
-        batch_size = 20  # 较小的批次大小
-        for i in range(0, len(all_paper_ids), batch_size):
-            batch_ids = all_paper_ids[i:i+batch_size]
-            batch_papers = fetch_batch_with_retry(batch_ids)
-            bar.update(len(batch_papers))
-            papers.extend(batch_papers)
+        logger.info(f"Found {len(all_paper_ids)} new papers. This will take approximately {len(all_paper_ids) * 30 // 60} minutes...")
+        
+        # 单篇获取，最保守的方式
+        for paper_id in tqdm(all_paper_ids, desc="Retrieving papers"):
+            for attempt in range(3):
+                try:
+                    search = arxiv.Search(id_list=[paper_id])
+                    result = next(client.results(search))
+                    papers.append(ArxivPaper(result))
+                    break
+                except (arxiv.HTTPError, StopIteration) as e:
+                    if attempt == 2:
+                        logger.warning(f"Failed to fetch {paper_id} after 3 attempts")
+                    time.sleep(30)  # 每次尝试后等待30秒
             
-            # 批次间延迟
-            if i + batch_size < len(all_paper_ids):
-                delay = 5 + random.uniform(0, 3)
-                time.sleep(delay)
-                
-        bar.close()
+            time.sleep(30)  # 每篇论文之间等待30秒
+        
         return papers
+    else:
+        # 调试模式代码保持不变
+        pass
 
     else:
         logger.debug("Retrieve 5 arxiv papers regardless of the date.")
