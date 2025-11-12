@@ -64,6 +64,12 @@ class ArxivPaper:
     
     @cached_property
     def tex(self) -> dict[str,str]:
+    # 检查是否可以下载源码
+    if not hasattr(self._paper, 'pdf_url') or self._paper.pdf_url is None:
+        logger.debug(f"Cannot download source for {self.arxiv_id}: pdf_url is None")
+        return None
+    
+    try:
         with ExitStack() as stack:
             tmpdirname = stack.enter_context(TemporaryDirectory())
             file = self._paper.download_source(dirpath=tmpdirname)
@@ -95,21 +101,23 @@ class ArxivPaper:
                 case _:
                     logger.debug(f"Cannot find main tex file of {self.arxiv_id} from bbl: There are multiple bbl files.")
                     main_tex = None
+                    
             if main_tex is None:
                 logger.debug(f"Trying to choose tex file containing the document block as main tex file of {self.arxiv_id}")
-            #read all tex files
+                
+            # read all tex files
             file_contents = {}
             for t in tex_files:
                 f = tar.extractfile(t)
                 content = f.read().decode('utf-8',errors='ignore')
-                #remove comments
+                # remove comments
                 content = re.sub(r'%.*\n', '\n', content)
                 content = re.sub(r'\\begin{comment}.*?\\end{comment}', '', content, flags=re.DOTALL)
                 content = re.sub(r'\\iffalse.*?\\fi', '', content, flags=re.DOTALL)
-                #remove redundant \n
+                # remove redundant \n
                 content = re.sub(r'\n+', '\n', content)
                 content = re.sub(r'\\\\', '', content)
-                #remove consecutive spaces
+                # remove consecutive spaces
                 content = re.sub(r'[ \t\r\f]{3,}', ' ', content)
                 if main_tex is None and re.search(r'\\begin\{document\}', content):
                     main_tex = t
@@ -118,7 +126,7 @@ class ArxivPaper:
             
             if main_tex is not None:
                 main_source:str = file_contents[main_tex]
-                #find and replace all included sub-files
+                # find and replace all included sub-files
                 include_files = re.findall(r'\\input\{(.+?)\}', main_source) + re.findall(r'\\include\{(.+?)\}', main_source)
                 for f in include_files:
                     if not f.endswith('.tex'):
@@ -130,7 +138,12 @@ class ArxivPaper:
             else:
                 logger.debug(f"Failed to find main tex file of {self.arxiv_id}: No tex file containing the document block.")
                 file_contents["all"] = None
+                
         return file_contents
+        
+    except Exception as e:
+        logger.warning(f"Error processing LaTeX source for {self.arxiv_id}: {e}")
+        return None
     
     @cached_property
     def tldr(self) -> str:
@@ -187,42 +200,63 @@ class ArxivPaper:
 
     @cached_property
     def affiliations(self) -> Optional[list[str]]:
-        if self.tex is not None:
-            content = self.tex.get("all")
-            if content is None:
-               content = "\n".join(v if v is not None else '' for v in self.tex.values())
-            #search for affiliations
-            possible_regions = [r'\\author.*?\\maketitle',r'\\begin{document}.*?\\begin{abstract}']
-            matches = [re.search(p, content, flags=re.DOTALL) for p in possible_regions]
-            match = next((m for m in matches if m), None)
-            if match:
-                information_region = match.group(0)
-            else:
-                logger.debug(f"Failed to extract affiliations of {self.arxiv_id}: No author information found.")
-                return None
-            prompt = f"Given the author information of a paper in latex format, extract the affiliations of the authors in a python list format, which is sorted by the author order. If there is no affiliation found, return an empty list '[]'. Following is the author information:\n{information_region}"
-            # use gpt-4o tokenizer for estimation
-            enc = tiktoken.encoding_for_model("gpt-4o")
-            prompt_tokens = enc.encode(prompt)
-            prompt_tokens = prompt_tokens[:4000]  # truncate to 4000 tokens
-            prompt = enc.decode(prompt_tokens)
-            llm = get_llm()
-            affiliations = llm.generate(
-                messages=[
-                    {
-                        "role": "system",
-                        "content": "You are an assistant who perfectly extracts affiliations of authors from the author information of a paper. You should return a python list of affiliations sorted by the author order, like ['TsingHua University','Peking University']. If an affiliation is consisted of multi-level affiliations, like 'Department of Computer Science, TsingHua University', you should return the top-level affiliation 'TsingHua University' only. Do not contain duplicated affiliations. If there is no affiliation found, you should return an empty list [ ]. You should only return the final list of affiliations, and do not return any intermediate results.",
-                    },
-                    {"role": "user", "content": prompt},
-                ]
-            )
+    # 检查 tex 是否为 None
+    if self.tex is None:
+        logger.debug(f"Cannot extract affiliations for {self.arxiv_id}: tex is None")
+        return None
+    
+    try:
+        content = self.tex.get("all")
+        if content is None:
+            # 只有当 tex 不为 None 但 "all" 为 None 时，才尝试连接其他 tex 文件内容
+            content = "\n".join(v if v is not None else '' for v in self.tex.values())
+        
+        # 检查 content 是否为空
+        if not content.strip():
+            logger.debug(f"Cannot extract affiliations for {self.arxiv_id}: no content available")
+            return None
+            
+        # 搜索 affiliations
+        possible_regions = [r'\\author.*?\\maketitle', r'\\begin{document}.*?\\begin{abstract}']
+        matches = [re.search(p, content, flags=re.DOTALL) for p in possible_regions]
+        match = next((m for m in matches if m), None)
+        
+        if match:
+            information_region = match.group(0)
+        else:
+            logger.debug(f"Failed to extract affiliations of {self.arxiv_id}: No author information found.")
+            return None
+            
+        prompt = f"Given the author information of a paper in latex format, extract the affiliations of the authors in a python list format, which is sorted by the author order. If there is no affiliation found, return an empty list '[]'. Following is the author information:\n{information_region}"
+        
+        # use gpt-4o tokenizer for estimation
+        enc = tiktoken.encoding_for_model("gpt-4o")
+        prompt_tokens = enc.encode(prompt)
+        prompt_tokens = prompt_tokens[:4000]  # truncate to 4000 tokens
+        prompt = enc.decode(prompt_tokens)
+        
+        llm = get_llm()
+        affiliations = llm.generate(
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You are an assistant who perfectly extracts affiliations of authors from the author information of a paper. You should return a python list of affiliations sorted by the author order, like ['TsingHua University','Peking University']. If an affiliation is consisted of multi-level affiliations, like 'Department of Computer Science, TsingHua University', you should return the top-level affiliation 'TsingHua University' only. Do not contain duplicated affiliations. If there is no affiliation found, you should return an empty list [ ]. You should only return the final list of affiliations, and do not return any intermediate results.",
+                },
+                {"role": "user", "content": prompt},
+            ]
+        )
 
-            try:
-                affiliations = re.search(r'\[.*?\]', affiliations, flags=re.DOTALL).group(0)
-                affiliations = eval(affiliations)
-                affiliations = list(set(affiliations))
-                affiliations = [str(a) for a in affiliations]
-            except Exception as e:
-                logger.debug(f"Failed to extract affiliations of {self.arxiv_id}: {e}")
-                return None
-            return affiliations
+        try:
+            affiliations = re.search(r'\[.*?\]', affiliations, flags=re.DOTALL).group(0)
+            affiliations = eval(affiliations)
+            affiliations = list(set(affiliations))
+            affiliations = [str(a) for a in affiliations]
+        except Exception as e:
+            logger.debug(f"Failed to extract affiliations of {self.arxiv_id}: {e}")
+            return None
+            
+        return affiliations
+        
+    except Exception as e:
+        logger.warning(f"Unexpected error extracting affiliations for {self.arxiv_id}: {e}")
+        return None
